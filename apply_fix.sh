@@ -14,7 +14,8 @@
 #   3. 修改 ModuleMOD.sh：描述文案随端口模式动态更新
 #   4. 修改 uninstall.sh：卸载时还原 Box mihomo 配置
 #   5. 清空 config.prop 中的 PROXY_URL（本模块不管理代理订阅）
-#   6. 解锁/重新锁定脚本防篡改
+#   6. 将 AdGuardHome.yaml 的 DNS 上游替换为国内 DoH（防国内域名解析绕行国外）
+#   7. 解锁/重新锁定脚本防篡改
 # ============================================================
 
 AGH_DIR="/data/adb/agh"
@@ -39,6 +40,10 @@ log "写入 scripts/BoxFix.sh ..."
 cat > "$SCRIPT_DIR/BoxFix.sh" <<'BOXEOF'
 #!/system/bin/sh
 # BoxFix v3 自适应协调器 + 端口自动同步
+#  - Box 存在   -> AGH 作为广告过滤上游（不劫持 53），mihomo nameserver 自动同步到 AGH 实际 DNS 端口
+#                  random 模式随机端口、fixed 模式固定 5591，两者均自动同步
+#  - Box 不存在 -> AGH 随机端口独立模式，iptables 劫持 53 做广告过滤
+# 安装顺序无关，独立使用兼容，全程无需用户干预
 CFG="/data/adb/box/mihomo/config.yaml"
 BOX_DIR="/data/adb/box"
 RESTART_CMD="/data/adb/box/scripts/box.service restart"
@@ -49,14 +54,17 @@ BIN_DIR="/data/adb/agh/bin"
 MARK="/data/adb/box/mihomo/.agh_fixed_v1"
 YAML="$BIN_DIR/AdGuardHome.yaml"
 
+# 防止重复启动
 [ "$(pgrep -f "$0" | wc -l)" -gt 1 ] && exit
 
 log() { echo "$(date '+%F %T') [BoxFix] $*" >> "$LOG"; }
 
+# Box 是否已安装（存在运行目录与 mihomo 配置）
 box_installed() {
   [ -d "$BOX_DIR" ] && [ -f "$CFG" ]
 }
 
+# 读取 AGH 实际 DNS 端口（yaml 优先，config.prop 兜底）
 get_agh_port() {
   local p
   p=$(awk '/^[[:space:]]*dns:/{f=1;next} f&&/^[[:space:]]*port:/{gsub(/[^0-9]/,"",$NF);print $NF;exit}' "$YAML" 2>/dev/null)
@@ -64,6 +72,7 @@ get_agh_port() {
   echo "$p"
 }
 
+# 判断 mihomo 配置是否已同步到指定端口
 is_synced() {
   local PORT="$1"
   [ -f "$CFG" ] || return 1
@@ -73,6 +82,7 @@ is_synced() {
   return 0
 }
 
+# 同步 mihomo 配置：fake-ip + DNS 上游指向 AGH 实际端口
 sync_mihomo() {
   local PORT="$1"
   [ -f "$CFG" ] || { log "未找到 $CFG，跳过同步"; return 0; }
@@ -100,6 +110,7 @@ sync_mihomo() {
   log "Box 服务已重启"
 }
 
+# 重启 AGH 进程
 restart_agh() {
   pkill -9 "AdGuardHome"
   sleep 1
@@ -107,6 +118,7 @@ restart_agh() {
   "$BIN_DIR/AdGuardHome" --no-check-update &
 }
 
+# 清理独立模式的劫持规则与守护脚本
 cleanup_standalone() {
   pkill -9 "ProxyConfig"
   pkill -9 "iptables.sh"
@@ -116,6 +128,7 @@ cleanup_standalone() {
   ip6tables -w 2 -D OUTPUT -p tcp --dport 53 -j DROP 2>/dev/null
 }
 
+# 切换到随机端口独立模式（未检测到 Box）
 switch_to_standalone() {
   log "未检测到 Box 模块，切换到随机端口独立模式"
   echo "random" > "$MODE_FILE"
@@ -132,13 +145,16 @@ current_mode() {
   [ -f "$MODE_FILE" ] && cat "$MODE_FILE" || echo "unknown"
 }
 
+# 主协调循环：每次启动立即执行一次，之后每 30 秒收敛
 while true; do
   MODE=$(current_mode)
   if box_installed; then
+    # 共存：AGH 作为上游，确保不劫持；mihomo 自动同步 AGH 实际端口
     cleanup_standalone
     AGH_PORT=$(get_agh_port)
     is_synced "$AGH_PORT" || sync_mihomo "$AGH_PORT"
   else
+    # 独立模式：随机端口劫持 53
     if [ "$MODE" != "random" ]; then
       switch_to_standalone
     else
@@ -207,7 +223,17 @@ if [ -f "$SCRIPT_DIR/config.prop" ]; then
     grep -q '^PROXY_URL=' "$SCRIPT_DIR/config.prop" || echo 'PROXY_URL=""' >> "$SCRIPT_DIR/config.prop"
 fi
 
-# 6. 重新锁定防篡改（仅锁定模块内脚本，BoxFix 在 agh/scripts 不锁，避免协调器自修复受阻）
+# 6. 修正 AdGuardHome.yaml 的 DNS 上游为国内 DoH（避免国内域名解析绕行国外导致加载慢）
+log "检查 AdGuardHome.yaml DNS 上游 ..."
+if grep -qE 'https://1\.1\.1\.1/dns-query|https://8\.8\.8\.8/dns-query' "$BIN_DIR/AdGuardHome.yaml"; then
+    log "检测到国外 DoH 上游，替换为国内 DoH ..."
+    sed -i 's|https://1\.1\.1\.1/dns-query|https://223.5.5.5/dns-query|; s|https://8\.8\.8\.8/dns-query|https://119.29.29.29/dns-query|' "$BIN_DIR/AdGuardHome.yaml"
+    log "DNS 上游已替换为国内 DoH"
+else
+    log "DNS 上游已是国内 DoH，跳过"
+fi
+
+# 7. 重新锁定防篡改（仅锁定模块内脚本，BoxFix 在 agh/scripts 不锁，避免协调器自修复受阻）
 find "$ADGPATH" -type f -name "*.sh" -exec chattr +i {} \; 2>/dev/null
 
 log "=============================================="

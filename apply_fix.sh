@@ -38,10 +38,11 @@ find "$ADGPATH" -type f -name "*.sh" -exec chattr -i {} \; 2>/dev/null
 log "写入 scripts/BoxFix.sh ..."
 cat > "$SCRIPT_DIR/BoxFix.sh" <<'BOXEOF'
 #!/system/bin/sh
-# BoxFix v7 自适应协调器 + 故障自动降级
+# BoxFix v8 自适应协调器 + 故障自动降级
 #  - Box 存在   -> AGH 作为广告过滤上游（不劫持 53），mihomo nameserver 自动同步到 AGH 实际 DNS 端口
 #                  random 模式随机端口、fixed 模式固定 5591，两者均自动同步
 #  - Box 不存在 -> AGH 随机端口独立模式，iptables 劫持 53 做广告过滤
+#  - 默认修正   -> 关闭 CNIP(cn_ip) 直连规则 + 强制开启 IPv6，保证 Google 等国外服务可用
 # 安装顺序无关，独立使用兼容，全程无需用户干预
 CFG="/data/adb/box/mihomo/config.yaml"
 BOX_DIR="/data/adb/box"
@@ -50,7 +51,7 @@ LOG="/data/adb/agh/agh.log"
 MODE_FILE="/data/adb/agh/.port_mode"
 SCRIPT_DIR="/data/adb/agh/scripts"
 BIN_DIR="/data/adb/agh/bin"
-MARK="/data/adb/box/mihomo/.agh_fixed_v7"
+MARK="/data/adb/box/mihomo/.agh_fixed_v8"
 DEGRADED_FLAG="/data/adb/box/mihomo/.degraded"
 YAML="$BIN_DIR/AdGuardHome.yaml"
 
@@ -91,6 +92,12 @@ is_synced() {
   sed -n '/^tun:/,/^[^ ]/p' "$CFG" > /tmp/.boxfix_tun_check 2>/dev/null
   grep -q '^[[:space:]]*enable:[[:space:]]*true' /tmp/.boxfix_tun_check || return 1
   rm -f /tmp/.boxfix_tun_check
+  # CNIP 直连规则是否已关闭（不再命中 cn_ip 规则集；rule-providers 定义保留）
+  grep -q '^[[:space:]]*-.*RULE-SET,cn_ip' "$CFG" && return 1
+  # IPv6 是否已开启（顶层 ipv6 与 dns.ipv6 均需为 true）
+  sed -n '/^dns:/,/^[^ ]/p' "$CFG" > /tmp/.boxfix_dns_check 2>/dev/null
+  grep -q '^[[:space:]]*ipv6:[[:space:]]*true' "$CFG" && grep -q '^[[:space:]]*ipv6:[[:space:]]*true' /tmp/.boxfix_dns_check || return 1
+  rm -f /tmp/.boxfix_dns_check
   return 0
 }
 
@@ -111,14 +118,30 @@ sync_mihomo() {
   sed -i "s/^\([[:space:]]*-[[:space:]]*\)127\.0\.0\.1:[0-9]*/\1127.0.0.1:$PORT/" "$CFG"
 
   # 确保 nameserver 存在
-  grep -q '^[[:space:]]*nameserver:' "$CFG" || \
+  if ! grep -q '^[[:space:]]*nameserver:' "$CFG"; then
     awk -v port="$PORT" '/^dns:/{print; print "  nameserver:"; print "    - 127.0.0.1:" port; next}1' "$CFG" > "$CFG.tmp" && mv "$CFG.tmp" "$CFG"
+  fi
 
   # 开启 tun
   sed -i '/^tun:/,/^[^ ]/{s/^\([[:space:]]*enable:\).*/\1 true/;}' "$CFG"
 
   # 开启 sniffer
   sed -i '/^sniffer:/,/^[^ ]/{s/^\([[:space:]]*enable:\).*/\1 true/;}' "$CFG"
+
+  # 关闭 CNIP：删除 cn_ip 规则集引用，避免国外 IP（如 Google）被误判为国内直连
+  sed -i '/RULE-SET,cn_ip,/d' "$CFG"
+
+  # 强制开启 IPv6（顶层 + dns 块），解决 IPv6 关闭导致的 Google 等连接失败
+  if grep -q '^ipv6:' "$CFG"; then
+    sed -i 's/^ipv6:.*/ipv6: true/' "$CFG"
+  else
+    sed -i '/^mode:/a\ipv6: true' "$CFG"
+  fi
+  if sed -n '/^dns:/,/^[^ ]/p' "$CFG" | grep -q '^[[:space:]]*ipv6:'; then
+    sed -i '/^dns:/,/^[^ ]/s/^\([[:space:]]*ipv6:\).*/\1 true/' "$CFG"
+  else
+    sed -i '/^dns:/a\  ipv6: true' "$CFG"
+  fi
 
   # 删除 Local_DNS_Forward 代理节点
   awk 'BEGIN{skip=0} /^[[:space:]]*-[[:space:]]*name:[[:space:]]*Local_DNS_Forward/{skip=1;next} skip && /^[[:space:]]*-[[:space:]]*name:/{skip=0} !skip' "$CFG" > "$CFG.tmp" && mv "$CFG.tmp" "$CFG"

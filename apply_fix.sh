@@ -38,11 +38,12 @@ find "$ADGPATH" -type f -name "*.sh" -exec chattr -i {} \; 2>/dev/null
 log "写入 scripts/BoxFix.sh ..."
 cat > "$SCRIPT_DIR/BoxFix.sh" <<'BOXEOF'
 #!/system/bin/sh
-# BoxFix v8 自适应协调器 + 故障自动降级
+# BoxFix v9 自适应协调器 + 故障自动降级
 #  - Box 存在   -> AGH 作为广告过滤上游（不劫持 53），mihomo nameserver 自动同步到 AGH 实际 DNS 端口
 #                  random 模式随机端口、fixed 模式固定 5591，两者均自动同步
 #  - Box 不存在 -> AGH 随机端口独立模式，iptables 劫持 53 做广告过滤
-#  - 默认修正   -> 关闭 CNIP(cn_ip) 直连规则 + 强制开启 IPv6，保证 Google 等国外服务可用
+#  - 分流原则   -> 域名规则命中走对应策略，cn_ip/private_ip 兜底国内直连，最后 MATCH 走代理
+#  - 默认修正   -> 强制开启 IPv6（解决 IPv6 关闭导致的 Google 等连接失败）；确保 cn_ip 直连兜底存在
 # 安装顺序无关，独立使用兼容，全程无需用户干预
 CFG="/data/adb/box/mihomo/config.yaml"
 BOX_DIR="/data/adb/box"
@@ -51,7 +52,7 @@ LOG="/data/adb/agh/agh.log"
 MODE_FILE="/data/adb/agh/.port_mode"
 SCRIPT_DIR="/data/adb/agh/scripts"
 BIN_DIR="/data/adb/agh/bin"
-MARK="/data/adb/box/mihomo/.agh_fixed_v8"
+MARK="/data/adb/box/mihomo/.agh_fixed_v9"
 DEGRADED_FLAG="/data/adb/box/mihomo/.degraded"
 YAML="$BIN_DIR/AdGuardHome.yaml"
 
@@ -92,8 +93,8 @@ is_synced() {
   sed -n '/^tun:/,/^[^ ]/p' "$CFG" > /tmp/.boxfix_tun_check 2>/dev/null
   grep -q '^[[:space:]]*enable:[[:space:]]*true' /tmp/.boxfix_tun_check || return 1
   rm -f /tmp/.boxfix_tun_check
-  # CNIP 直连规则是否已关闭（不再命中 cn_ip 规则集；rule-providers 定义保留）
-  grep -q '^[[:space:]]*-.*RULE-SET,cn_ip' "$CFG" && return 1
+  # cn_ip 国内 IP 直连兜底必须存在（保证本地连接优先直连，不绕代理）
+  grep -q 'RULE-SET,cn_ip' "$CFG" || return 1
   # IPv6 是否已开启（顶层 ipv6 与 dns.ipv6 均需为 true）
   sed -n '/^dns:/,/^[^ ]/p' "$CFG" > /tmp/.boxfix_dns_check 2>/dev/null
   grep -q '^[[:space:]]*ipv6:[[:space:]]*true' "$CFG" && grep -q '^[[:space:]]*ipv6:[[:space:]]*true' /tmp/.boxfix_dns_check || return 1
@@ -128,8 +129,12 @@ sync_mihomo() {
   # 开启 sniffer
   sed -i '/^sniffer:/,/^[^ ]/{s/^\([[:space:]]*enable:\).*/\1 true/;}' "$CFG"
 
-  # 关闭 CNIP：删除 cn_ip 规则集引用，避免国外 IP（如 Google）被误判为国内直连
-  sed -i '/RULE-SET,cn_ip,/d' "$CFG"
+  # 确保 cn_ip 国内 IP 直连兜底存在（若被误删则加回，保证本地连接优先直连不绕代理）
+  if ! grep -q 'RULE-SET,cn_ip' "$CFG"; then
+    sed -i 's/^\([[:space:]]*-[[:space:]]*\)RULE-SET,cn_domain,国内直连/\1RULE-SET,cn_domain,国内直连\n\1RULE-SET,cn_ip,国内直连/' "$CFG"
+    grep -q 'RULE-SET,cn_ip' "$CFG" || sed -i 's/^\([[:space:]]*\)- MATCH,/\1- RULE-SET,cn_ip,国内直连\n\1- MATCH,/' "$CFG"
+    log "cn_ip 国内直连兜底已恢复"
+  fi
 
   # 强制开启 IPv6（顶层 + dns 块），解决 IPv6 关闭导致的 Google 等连接失败
   if grep -q '^ipv6:' "$CFG"; then

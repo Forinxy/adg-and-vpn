@@ -204,6 +204,20 @@ sync_mihomo() {
   rm -f "$DEGRADED_FLAG"
   touch "$MARK"
   log "配置同步完成，重启 Box ..."
+
+  # box.service restart 存在竞态：旧进程未完全退出时 start_box 被调用，
+  # 触发递归 stop_box → start_box，导致新旧 mihomo 同时抢端口/TUN
+  # 先确保所有 mihomo 进程彻底死亡再重启
+  pkill -15 -f "mihomo" 2>/dev/null
+  local wait_i=0
+  while [ $wait_i -lt 10 ]; do
+    pgrep -f "mihomo" >/dev/null 2>&1 || break
+    wait_i=$((wait_i + 1))
+    sleep 0.5
+  done
+  pgrep -f "mihomo" >/dev/null 2>&1 && pkill -9 -f "mihomo" 2>/dev/null
+  sleep 2
+
   $RESTART_CMD
   log "Box 服务已重启"
 }

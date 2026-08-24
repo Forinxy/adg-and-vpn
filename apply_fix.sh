@@ -9,13 +9,12 @@
 #   sh /data/local/tmp/apply_fix.sh
 #
 # 本脚本自动完成：
-#   1. 写入 scripts/BoxFix.sh（自适应协调器 v12）
+#   1. 写入 scripts/BoxFix.sh（自适应协调器 v13）
 #   2. 修改 service.sh：启动 BoxFix + 读取 .port_mode 设置端口
 #   3. 修改 ModuleMOD.sh：描述文案随端口模式动态更新
 #   4. 修改 uninstall.sh：卸载时还原 Box mihomo 配置
 #   5. 清空 config.prop 中的 PROXY_URL（本模块不管理代理订阅）
-#   6. 修改 box.service：prepare_mihomo 跳过 enhanced-mode 覆盖（AGH 兼容）
-#   7. 解锁/重新锁定脚本防篡改
+#   6. 解锁/重新锁定脚本防篡改
 # ============================================================
 
 AGH_DIR="/data/adb/agh"
@@ -40,13 +39,14 @@ log "写入 scripts/BoxFix.sh ..."
 cat > "$SCRIPT_DIR/BoxFix.sh" <<'BOXEOF'
 #!/system/bin/sh
 # ============================================================
-# BoxFix v12 自适应协调器 + 故障自动降级
+# BoxFix v13 自适应协调器 + 故障自动降级
 #
-# 相比 v11 的改进：
-#   1. 【修复重启后 VPN 无法自动连接】sync_mihomo 重启后验证
-#      enhanced-mode 是否被 prepare_mihomo 覆盖，日志告警
-#   2. 配合 apply_fix.sh 修改 box.service，跳过 enhanced-mode 覆盖
-#      （AGH 共存时 prepare_mihomo 不再将 fake-ip 改回 redir-host）
+# 相比 v12 的改进：
+#   1. 【修复重启后 VPN 无法连接】新增 wait_for_agh，确保 AGH 就绪后
+#      才将 mihomo DNS 指向 AGH，避免 DNS 解析失败导致代理无法连接
+#   2. 【恢复 degrade_to_direct】代理不可达时关闭 tun + 切 redir-host，
+#      比 iptables 回退更可靠（mihomo tun 不拦截流量，网络直接可用）
+#   3. 移除 prepare_mihomo 覆盖验证和 box.service 修改（v12 回退）
 #
 #  - Box 存在   -> AGH 作为广告过滤上游（不劫持 53），mihomo nameserver 自动同步到 AGH 实际 DNS 端口
 #                  random 模式随机端口、fixed 模式固定 5591，两者均自动同步
@@ -86,6 +86,19 @@ wait_for_boot() {
     sleep 2
   done
   log "系统开机完成"
+}
+
+# 等待 AGH DNS 端口就绪（最多 30 秒）
+wait_for_agh() {
+  local i=0 port
+  while [ $i -lt 15 ]; do
+    port=$(get_agh_port)
+    [ -n "$port" ] && timeout 2 sh -c "echo > /dev/tcp/127.0.0.1/$port" >/dev/null 2>&1 && return 0
+    i=$((i + 1))
+    sleep 2
+  done
+  log "警告：AGH 端口未就绪，继续执行"
+  return 1
 }
 
 # Box 是否已安装（存在运行目录与 mihomo 配置）
@@ -192,33 +205,30 @@ sync_mihomo() {
   touch "$MARK"
   log "配置同步完成，重启 Box ..."
   $RESTART_CMD
-  # 等待 box.service 的 prepare_mihomo 完成（可能覆盖 enhanced-mode）
-  sleep 3
-  local current_em
-  current_em=$(awk '/enhanced-mode:/ {print $2}' "$CFG" 2>/dev/null)
-  if [ "$current_em" != "fake-ip" ]; then
-    log "警告：box.service prepare_mihomo 将 enhanced-mode 改回 $current_em"
-    log "建议运行 apply_fix.sh 注入 AGH 兼容补丁（跳过 enhanced-mode 覆盖）"
-  fi
   log "Box 服务已重启"
 }
 
-# 降级到独立模式（代理不可用时，用 AGH 直连 DNS 保障国内网络）
-fallback_to_standalone() {
-  local PORT="$1"
-  log "代理不可达，切换到独立模式，DNS 由 AGH 直连 ..."
-  [ -z "$PORT" ] && { log "AGH 端口未知，无法切换"; return 1; }
-
-  iptables -w 2 -t nat -N ADGUARD 2>/dev/null
-  iptables -w 2 -t nat -I OUTPUT -j ADGUARD 2>/dev/null
-  iptables -w 2 -t nat -F ADGUARD
-  iptables -w 2 -t nat -A ADGUARD -p udp --dport 53 -j REDIRECT --to-ports "$PORT"
-  iptables -w 2 -t nat -A ADGUARD -p tcp --dport 53 -j REDIRECT --to-ports "$PORT"
-  ip6tables -w 2 -A OUTPUT -p udp --dport 53 -j DROP 2>/dev/null
-  ip6tables -w 2 -A OUTPUT -p tcp --dport 53 -j DROP 2>/dev/null
-
+# 降级到直连模式（代理不可达时，关闭 tun + 切 redir-host，保障国内网络可用）
+# 不还原 aghbak，避免覆盖已同步的 DNS 端口配置
+degrade_to_direct() {
+  log "代理不可达，降级到直连模式，关闭 tun ..."
+  [ -f "$CFG" ] || { log "未找到 $CFG，跳过降级"; return 1; }
+  cp -f "$CFG" "$CFG.degbak"
+  sed -i '/^tun:/,/^[^ ]/{s/^\([[:space:]]*enable:\).*/\1 false/;}' "$CFG"
+  sed -i 's/^\([[:space:]]*enhanced-mode:\).*/\1 redir-host/' "$CFG"
   touch "$DEGRADED_FLAG"
-  log "已切换到独立模式 (AGH 端口 $PORT)，国内网络应可用"
+  $RESTART_CMD
+  log "已降级到直连模式，tun 已关闭，网络应可用"
+}
+
+# 从直连模式恢复（代理恢复时，重新开启 tun + 切回 fake-ip）
+restore_from_degrade() {
+  log "代理已恢复，从直连模式恢复 ..."
+  [ -f "$CFG.degbak" ] && cp -f "$CFG.degbak" "$CFG" && rm -f "$CFG.degbak"
+  rm -f "$DEGRADED_FLAG"
+  touch "$MARK"
+  $RESTART_CMD
+  log "已从直连模式恢复"
 }
 
 # 重启 AGH 进程
@@ -228,12 +238,13 @@ restart_agh() {
   "$BIN_DIR/AdGuardHome" --no-check-update &
 }
 
-# 清理独立模式的劫持规则与守护脚本
+# 清理直连/独立模式的残留
 cleanup_standalone() {
   pkill -9 "ProxyConfig"; pkill -9 "iptables.sh"
   iptables -w 2 -t nat -F ADGUARD 2>/dev/null; iptables -w 2 -t nat -X ADGUARD 2>/dev/null
   ip6tables -w 2 -D OUTPUT -p udp --dport 53 -j DROP 2>/dev/null
   ip6tables -w 2 -D OUTPUT -p tcp --dport 53 -j DROP 2>/dev/null
+  rm -f "$CFG.degbak" 2>/dev/null
 }
 
 # 切换到随机端口独立模式（未检测到 Box）
@@ -272,7 +283,7 @@ start_aghproxy() {
 # ═══════════════════════════════════════════════
 # 主流程
 # ═══════════════════════════════════════════════
-log "BoxFix v11 启动"
+log "BoxFix v13 启动"
 
 # 确保管理脚本可执行
 chmod 755 "$CTL" "$SCRIPT_DIR/aghproxy" "$SCRIPT_DIR/aghbridge" "$SCRIPT_DIR/aghappclean" 2>/dev/null
@@ -285,6 +296,9 @@ start_aghproxy
 
 # 等待系统开机完成（避免开机早期干扰 Box 启动）
 wait_for_boot
+
+# 等待 AGH DNS 端口就绪（确保 mihomo 启动时 AGH 可解析）
+wait_for_agh
 
 # 状态跟踪
 degraded=0
@@ -301,8 +315,6 @@ if box_installed; then
     sync_mihomo "$AGH_PORT"
   else
     log "配置已同步"
-    # 代理不可达时重启 Box：mihomo 可能启动时 AGH 未就绪，
-    # 导致 DNS 解析失败而无法连接代理服务器
     if ! proxy_reachable; then
       log "初始代理不可达，重启 Box（AGH 已就绪后重试）"
       $RESTART_CMD
@@ -320,16 +332,15 @@ while true; do
 
     if proxy_reachable; then
       if [ -f "$DEGRADED_FLAG" ]; then
-        log "代理已恢复，清理独立模式，切回 Box 模式"
-        cleanup_standalone
+        log "代理已恢复，从直连模式切回 Box 模式"
+        restore_from_degrade
         degraded=0
+        cleanup_standalone
       fi
       last_proxy_ok=1
       check_count=0
       needs_sync "$AGH_PORT" && sync_mihomo "$AGH_PORT"
 
-      # 网络健康时每 10 轮（5 分钟）检查一次国内连通性
-      # 仅在怀疑有问题时（check_count>0）才每轮检查
       network_check_counter=$((network_check_counter + 1))
       if [ $network_check_counter -ge $NETWORK_CHECK_INTERVAL ] || [ "$check_count" -gt 0 ]; then
         network_check_counter=0
@@ -337,7 +348,7 @@ while true; do
           log "警告：mihomo 运行中但国内网络不可达，代理可能已失效"
           check_count=$((check_count + 1))
           if [ $check_count -ge 3 ] && [ "$degraded" -eq 0 ]; then
-            fallback_to_standalone "$AGH_PORT"
+            degrade_to_direct
             degraded=1
             check_count=0
             write_state
@@ -353,7 +364,7 @@ while true; do
       check_count=$((check_count + 1))
 
       if [ $check_count -ge 3 ] && [ "$degraded" -eq 0 ]; then
-        fallback_to_standalone "$AGH_PORT"
+        degrade_to_direct
         degraded=1
         check_count=0
         write_state
@@ -371,7 +382,7 @@ while true; do
 done
 BOXEOF
 chmod 755 "$SCRIPT_DIR/BoxFix.sh"
-log "BoxFix.sh v12 写入完成"
+log "BoxFix.sh v13 写入完成"
 
 # 1.5 写入管理工具集与规则文件
 # 查找路径：优先 agh-manager/scripts/ 子目录，其次同目录（兼容两种分发方式）
@@ -478,31 +489,10 @@ else
     log "规则文件或 yaml 缺失，跳过规则注入"
 fi
 
-# 6. 修改 box.service：prepare_mihomo 跳过 enhanced-mode 覆盖（AGH 兼容）
-log "检查 box.service ..."
-BOX_SERVICE="/data/adb/box/scripts/box.service"
-if [ -f "$BOX_SERVICE" ]; then
-    if grep -q "aghctl" "$BOX_SERVICE"; then
-        log "box.service 已含 AGH 兼容逻辑，跳过"
-    else
-        log "box.service 未含 AGH 兼容逻辑，注入 AGH 检测 ..."
-        # 在 prepare_mihomo 的 enhanced-mode 覆盖代码前插入 AGH 检测
-        sed -i '/log Warning "已将 fake-ip 替换为 redir-host"/i\      if [ ! -x /data/adb/agh/bin/aghctl ]; then' "$BOX_SERVICE"
-        # 在 sniffer 修改行后插入 fi
-        sed -i '/^[[:space:]]*sed_file_if_changed "${mihomo_config}" "\/sniffer:/a\      fi' "$BOX_SERVICE"
-        log "box.service 已注入 AGH 检测跳过 enhance-mode 覆盖"
-    fi
-else
-    log "未找到 box.service（Box 可能未安装），跳过"
-fi
-
-# 7. 重新锁定防篡改（仅锁定模块内脚本，BoxFix 在 agh/scripts 不锁，避免协调器自修复受阻）
+# 6. 重新锁定防篡改（仅锁定模块内脚本，BoxFix 在 agh/scripts 不锁，避免协调器自修复受阻）
 find "$ADGPATH" -type f -name "*.sh" -exec chattr +i {} \; 2>/dev/null
 
 log "=============================================="
 log "修复完成！请重启设备或在终端执行："
 log "  pkill -f AdGuardHome && sh /data/adb/modules/AdGuardHome/service.sh &"
-log ""
-log "注意：步骤 6 已修改 /data/adb/box/scripts/box.service，"
-log "      若后续更新 Box 模块需重新运行本脚本。"
 log "=============================================="

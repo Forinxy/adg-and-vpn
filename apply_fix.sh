@@ -47,6 +47,9 @@ cat > "$SCRIPT_DIR/BoxFix.sh" <<'BOXEOF'
 #   2. 【修复断连问题】fallback_to_standalone 替代 degrade_to_direct，
 #      Box 断连时启用 iptables 53 劫持到 AGH，保障国内网络可用
 #   3. 主循环不再无条件清理 iptables 规则，避免规则窗口期
+#   4. 【修复代理到期断网】新增 network_reachable 检测，
+#      代理到期/接口不可用时 mihomo 仍在运行但流量被阻塞，
+#      network_reachable 通过直连国内 DNS 识别此状态并触发回退
 #
 #  - Box 存在   -> AGH 作为广告过滤上游（不劫持 53），mihomo nameserver 自动同步到 AGH 实际 DNS 端口
 #                  random 模式随机端口、fixed 模式固定 5591，两者均自动同步
@@ -99,6 +102,21 @@ proxy_reachable() {
   timeout 2 sh -c 'echo > /dev/tcp/127.0.0.1/1053' >/dev/null 2>&1 && return 0
   timeout 2 ss -tln 2>/dev/null | grep -q ":1053 " && return 0
   return 1
+}
+
+# 检测国内网络是否可用（直连国内 DNS 服务器，判断 mihomo 代理是否正常工作）
+# 当代理到期/接口不可用时，mihomo 仍在运行但所有流量被阻塞，
+# 此检查能识别出这种"代理假死"状态，触发独立模式回退
+network_reachable() {
+  local PORT
+  PORT=$(get_agh_port)
+  [ -z "$PORT" ] && return 1
+  # 直连阿里 DNS  TCP 53（走 cn_ip 直连规则）
+  timeout 3 sh -c 'echo > /dev/tcp/223.5.5.5/53' >/dev/null 2>&1 && return 0
+  # 直连腾讯 DNS TCP 53
+  timeout 3 sh -c 'echo > /dev/tcp/119.29.29.29/53' >/dev/null 2>&1 && return 0
+  # 兜底：检查 AGH 本身是否存活
+  timeout 2 sh -c 'echo > /dev/tcp/127.0.0.1/'"$PORT" >/dev/null 2>&1
 }
 
 # 读取 AGH 实际 DNS 端口（yaml 优先，config.prop 兜底）
@@ -300,7 +318,21 @@ while true; do
         degraded=0
       fi
       last_proxy_ok=1
+      check_count=0
       needs_sync "$AGH_PORT" && sync_mihomo "$AGH_PORT"
+
+      # 即使 mihomo 进程存活，也要检查国内网络是否正常
+      # 代理到期/接口不可用时 mihomo 仍在运行但所有流量被阻塞
+      if ! network_reachable; then
+        log "警告：mihomo 运行中但国内网络不可达，代理可能已失效"
+        check_count=$((check_count + 1))
+        if [ $check_count -ge 3 ] && [ "$degraded" -eq 0 ]; then
+          fallback_to_standalone "$AGH_PORT"
+          degraded=1
+          check_count=0
+          write_state
+        fi
+      fi
     else
       if [ "$last_proxy_ok" -eq 1 ]; then
         log "警告：代理不可达，开始监控"

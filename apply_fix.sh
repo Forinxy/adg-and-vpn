@@ -101,19 +101,6 @@ wait_for_agh() {
   return 1
 }
 
-# 等待网络就绪（直连国内 DNS，最多 60 秒）
-wait_for_network() {
-  local i=0
-  while [ $i -lt 30 ]; do
-    timeout 3 sh -c 'echo > /dev/tcp/223.5.5.5/53' >/dev/null 2>&1 && return 0
-    timeout 3 sh -c 'echo > /dev/tcp/119.29.29.29/53' >/dev/null 2>&1 && return 0
-    i=$((i + 1))
-    sleep 2
-  done
-  log "警告：网络未就绪，继续执行"
-  return 1
-}
-
 # Box 是否已安装（存在运行目录与 mihomo 配置）
 box_installed() {
   [ -d "$BOX_DIR" ] && [ -f "$CFG" ]
@@ -326,9 +313,6 @@ wait_for_boot
 
 # 等待 AGH DNS 端口就绪（确保 mihomo 启动时 AGH 可解析）
 wait_for_agh
-
-# 等待网络就绪（避免 mihomo 启动时互联网未连接导致代理节点标记无效）
-wait_for_network
 
 # 状态跟踪
 degraded=0

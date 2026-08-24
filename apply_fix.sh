@@ -276,6 +276,13 @@ if box_installed; then
     sync_mihomo "$AGH_PORT"
   else
     log "配置已同步"
+    # 代理不可达时重启 Box：mihomo 可能启动时 AGH 未就绪，
+    # 导致 DNS 解析失败而无法连接代理服务器
+    if ! proxy_reachable; then
+      log "初始代理不可达，重启 Box（AGH 已就绪后重试）"
+      $RESTART_CMD
+      log "Box 已重启"
+    fi
   fi
 fi
 

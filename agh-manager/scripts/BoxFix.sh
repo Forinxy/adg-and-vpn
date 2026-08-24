@@ -155,10 +155,6 @@ sync_mihomo() {
   rm -f "$DEGRADED_FLAG"
   touch "$MARK"
   log "配置同步完成，重启 Box ..."
-  # 先强制停止旧 mihomo 进程，释放端口（9090/9797/9898/7890/1053/TUN），
-  # 避免 box.service restart 未完全停止旧进程导致新实例绑定失败
-  pkill -9 -x "mihomo" 2>/dev/null
-  sleep 2
   $RESTART_CMD
   log "Box 服务已重启"
 }

@@ -1,0 +1,344 @@
+# ============================================================
+# AGH 中国 App 广告过滤规则（从 Android 项目学习提炼）
+# 分类整理，便于维护
+# ============================================================
+
+# ═══════════════════════════════════════════════
+# 一、HTTPDNS 拦截（防止 App 绕过 AGH 的 DNS 过滤）
+# ═══════════════════════════════════════════════
+||hdns.ksyun.com^$important
+||apidns.kwd.inkuai.com^$important
+||httpdns.*^$important
+||dns*.weixin.qq.*^$important
+||dns.qq.com^$important
+||*dns.weixin.qq.*^$important
+||doh.dns.apple.com^$important
+||doh.ptqy.gitv.tv^$important
+||dns.qiyipic.iqiyi.com^$important
+||dns.weibo.cn^$important
+||dns.jd.com^$important
+||dns.m.sm.cn^$important
+||catdot.dianping.com^$important
+||dot.api.idmzj.com^$important
+||doh.iqiyi.com^$important
+||paydns.wechatpay.cn^$important
+
+# ═══════════════════════════════════════════════
+# 二、国内 DoH 放行（避免误杀公共 DNS）
+# ═══════════════════════════════════════════════
+@@||dns.google^$important
+@@||cloudflare-dns.com^$important
+@@||security.cloudflare-dns.com^$important
+@@||family.cloudflare-dns.com^$important
+@@||one.one.one.one^$important
+@@||dns.quad9.net^$important
+@@||dns.adguard-dns.com^$important
+@@||dns-family.adguard.com^$important
+@@||dns-unfiltered.adguard.com^$important
+@@||doh.opendns.com^$important
+@@||doh.cleanbrowsing.org^$important
+@@||dns.alidns.com^$important
+@@||doh.pub^$important
+@@||doh.360.cn^$important
+
+# ═══════════════════════════════════════════════
+# 三、腾讯系广告拦截
+# ═══════════════════════════════════════════════
+||compliance.tdos.qq.com^$important
+||tianshu.gtimg.cn^$important
+||r.release.qq.com^$important
+||wup.imtt.qq.com^$important
+||tam.cdn-go.cn^$important
+||apponline.research.qq.com^$important
+||tmfmazuhttp-wangka.m.qq.com^$important
+||stun.qqlive.qq.com^$important
+||punch.p2p.qq.com^$important
+||static.qblv.qq.com^$important
+||qbuc.html5.qq.com^$important
+||ug.qbimg.qq.com^$important
+||mcdn.kandian.qq.com^$important
+||apd-pcdnwxlogin.teg.tencent-cloud.net^$important
+
+# 腾讯放行
+@@||c.pc.qq.com^$important
+@@||sfp.safe.baidu.com^$important
+@@||dlswbr.baidu.com^$important
+@@||game.weixin.qq.com^$important
+@@||szlong.weixin.qq.com^$important
+@@||imtt.dd.qq.com^$important
+@@||down-update.qq.com^$important
+
+# ═══════════════════════════════════════════════
+# 四、百度系广告拦截
+# ═══════════════════════════════════════════════
+||s.bdstatic.com^$important
+||wjz-cdn.baidu.com^$important
+||pcdn-tracker.baidu.com^$important
+||recommend_list.baidu.com^$important
+||activity.baidu.com^$important
+||ada.baidu.com^$important
+||fc-ccimage.baidu.com^$important
+||miaozhen.com^$important
+||sptest.baidu.com^$important
+||uisong.baidu.com^$important
+||hpd.baidu.com^$important
+||fclick.baidu.com^$important
+||fclickv4.baidu.com^$important
+||h2tcbox.baidu.com^$important
+||nourl.ubs.baidu.com^$important
+||fakeurl.virtual.baidu.com^$important
+||wejianzhan.com^$important
+||oschina.net^$important
+||staticsns.cdn.bcebos.com^$important
+||dss0.bdstatic.com^$important
+||plusjrmallstatic.cdn.bcebos.com^$important
+
+# 百度输入法/云盘放行
+@@||mime.baidu.com^$important
+@@||a0.app.xiaomi.com^$important
+
+# ═══════════════════════════════════════════════
+# 五、字节跳动（抖音/今日头条/番茄）广告拦截
+# ═══════════════════════════════════════════════
+||crashlytics.com^$important
+||ads*-normal-hl.zijieapi.com^$important
+||log*-applog-hl.fqnovel.com^$important
+||rtlog*-applog-hl.fqnovel.com^$important
+||p*-ad-sign.byteimg.com^$important
+||abtest*-misc-*.zijieapi.com^$important
+||gecko5-lq.zijieapi.com^$important
+||zlink.toutiao.com^$important
+||adim.pinduoduo.com^$important
+||cjjd14.com^$important
+||lf-reward-video.bytedcdn.com^$important
+||homeborn.cn^$important
+||lf-cdn-tos.bytescm.com^$important
+||*-reading.fqnovelstatic.com^$important
+||pitaya.bytedance.com^$important
+||*-pitaya.bytetos.com^$important
+||*-pitaya-tos.pstatp.com^$important
+||*-luckycat.byteimg.com^$important
+||*-normal-lq.zijieapi.com^$important
+||*-luckycatopen.byteimg.com^$important
+||*-cdn-tos.bytegeckoext.com^$important
+||*-novelapp.fqnovelvod.com^$important
+||webcast*-open-lq.douyin.com^$important
+||ttwebview.com^$important
+||volcsiriusbd.com^$important
+||vegslb.com^$important
+||open.douyin.com^$important
+||*-open.douyin.com^$important
+||vod-settings.bytedanceapi.com^$important
+||ad-log-upload.mihoyo.com^$important
+||h5log-api-dualstack.mihoyo.com^$important
+||log-upload-v6.mihoyo.com^$important
+||oceanengine.com^$important
+||api*-normal-c-lf.amemv.com^$important
+||ssp.*rtb.com^$important
+||tnc*-bjlgy.zijieapi.com^$important
+||abtestvm.bytedance.com^$important
+||tapad-platform.tapimg.com^$important
+||tap-dsp.iem.taptap.cn^$important
+||abtest*-misc.zijieapi.com^$important
+||ugsdk.cn^$important
+
+# 字节跳动放行
+@@||saveu5-normal-lq.zijieapi.com^$important
+@@||ecombdimg.com^$important
+@@||log.snssdk.com^$important
+@@||tnc3-alisc1.snssdk.com^$important
+@@||content-open.douyin.com^$important
+@@||dig.bdurl.net^$important
+@@||i.snssdk.com^$important
+@@||article.zlink.toutiao.com^$important
+
+# ═══════════════════════════════════════════════
+# 六、快手广告拦截
+# ═══════════════════════════════════════════════
+||log-sdk.ksapisrv.com^$important
+||open.e.kuaishou.*^$important
+||open.kuaishouzt.com^$important
+||api.e.kuaishou.cn^$important
+||frontend-perf-service.e.kuaishou.com^$important
+||ad*kwai.com^$important
+||kskwai.com^$important
+||xxpkg.com^$important
+||comfylink.com^$important
+||djvod.ndcimgs.com^$important
+||promotion-partner.kuaishou.com^$important
+
+# 快手放行
+@@||pull.yximgs.com^$important
+@@||s2.kskwai.com^$important
+
+# ═══════════════════════════════════════════════
+# 七、哔哩哔哩广告/PCDN 拦截
+# ═══════════════════════════════════════════════
+||chat.bilibili.com^$important
+||365dmp.com^$important
+||biliapi.net^$important
+||biliapi.com^$important
+
+# B站放行
+@@||grpc.biliapi.net^$important
+
+# ═══════════════════════════════════════════════
+# 八、微博广告拦截
+# ═══════════════════════════════════════════════
+||forecast.sina.cn^$important
+||sdkapp.uve.weibo.com^$important
+||down.apps.sina.cn^$important
+||bootpreload.uve.weibo.com^$important
+||dp.im.weibo.cn^$important
+||adimg.uve.weibo.com^$important
+||ads*.cj.sina.com.cn^$important
+||sax.sina.com.cn^$important
+||pluto.sina.cn^$important
+||api.sina.cn^$important
+
+# ═══════════════════════════════════════════════
+# 九、美团/大众点评广告拦截
+# ═══════════════════════════════════════════════
+||catfront.dianping.com^$important
+||data-sdk-uuid-log.d.meituan.net^$important
+||tec73.com^$important
+||wmlog.meituan.com^$important
+||volces.com^$important
+||logan.sankuai.com^$important
+||alita.waimai.meituan.com^$important
+
+# 美团放行
+@@||mrn.meituan.net^$important
+@@||i.meituan.com^$important
+
+# ═══════════════════════════════════════════════
+# 十、网易（云音乐/游戏）广告拦截
+# ═══════════════════════════════════════════════
+||nstool.netease.com^$important
+||nstool.laiqukankan.com^$important
+||sd-gl.xycdn.com^$important
+||sdk*xyajs.data.kuiniuca.com^$important
+||qiezibenpao.com^$important
+||goblin.hupu.com^$important
+||e-goblin.hupu.com^$important
+||hermes.hupu.com^$important
+||gdc.hupucdn.com^$important
+||collect.hupu.com^$important
+||nur.hupu.com^$important
+||hss.hupu.com^$important
+||downloadmobile.hupu.com^$important
+||themis.hupu.com^$important
+||activity-static.hoopchina.com.cn^$important
+
+# 网易放行
+@@||api.look.163.com^$important
+@@||dun.163.com^$important
+@@||toblog.ctobsnssdk.com^$important
+
+# ═══════════════════════════════════════════════
+# 十一、小米/OPPO/魅族系统广告拦截
+# ═══════════════════════════════════════════════
+||tracking.india.miui.com^$important
+||sa.api.intl.miui.com^$important
+||data.mistat.intl.xiaomi.com^$important
+||metok.sys.miui.com^$important
+||open-iflow.meizu.com^$important
+||reader.meizu.com^$important
+||dw-reader.meizu.com^$important
+||tongji-resl.meizu.com^$important
+||api-flow.flyme.cn^$important
+||129.227.29.163^$important
+||142.251.43.10^$important
+||13.214.52.63^$important
+||52.77.59.64^$important
+||129.227.17.145^$important
+||58.242.130.102^$important
+||129.227.29.192^$important
+||13.213.183.160^$important
+||129.227.17.142^$important
+||106.38.236.63^$important
+||106.3.18.4^$important
+
+# 小米互联/相册AI放行
+@@||hpplay.cn^$important
+@@||mcc.inf.miui.com^$important
+@@||apm-rum.inf.miui.com^$important
+@@||xn--osvr71goa.com^$important
+
+# ═══════════════════════════════════════════════
+# 十二、拼多多/淘宝/飞猪广告拦截
+# ═══════════════════════════════════════════════
+||pages-fast.m.taobao.com^$important
+||pages.goofish.com^$important
+||lp.pinduoduo.com^$important
+||meta.pinduoduo.com^$important
+||apm-a.pinduoduo.com^$important
+||adbiding.com^$important
+||tbexpand.alicdn.com^$important
+||pigeon.alicdn.com^$important
+||ssp-landing.taptap.cn^$important
+||site.u-mob.cn^$important
+||acs4baichuan.m.taobao.com^$important
+||adashxgc.ut.taobao.com^$important
+||at.pinduoduo.com^$important
+
+# 淘宝/阿里系放行
+@@||uland.taobao.com^$important
+@@||s.click.*.com^$important
+@@||www.iconfont.cn^$important
+@@||retcode.taobao.com^$important
+@@||audid-api.taobao.com^$important
+@@||ynuf.alipay.com^$important
+@@||order.sm.cn^$important
+
+# ═══════════════════════════════════════════════
+# 十三、输入法放行（避免影响云输入体验）
+# ═══════════════════════════════════════════════
+@@||shouji.sogou.com^$important
+@@input.shouji.sogou.com^$important
+@@shouji.360.cn^$important
+
+# ═══════════════════════════════════════════════
+# 十四、通用广告/Analytics/Tracking 拦截
+# ═══════════════════════════════════════════════
+||ads.*^$important
+||analytics.*^$important
+||hotjar.com^$important
+||sentry.io^$important
+||doubleclick.net^$important
+||log.*^$important
+||logconf.iflytek.com^$important
+||logan.sankuai.com^$important
+||marketingplatform.google.com^$important
+||advertising.amazon.com^$important
+||assoc-amazon.com^$important
+||appcenter.ms^$important
+||appupdate.189.cn^$important
+||appupdates.189.cn^$important
+||bkappad.189.cn^$important
+||mdc.bestpay.com.cn^$important
+
+# ═══════════════════════════════════════════════
+# 十五、推送服务放行（避免影响消息推送）
+# ═══════════════════════════════════════════════
+@@||*push.*^$important
+@@||tpns.tencent.com^$important
+@@||cnlogs.umeng.com^$important
+@@||resolve.umeng.com^$important
+@@||cnlogs.umengcloud.com^$important
+@@||errnewlog.umeng.com^$important
+@@||auni.telecome.cn^$important
+@@||auni.unioncom.cc^$important
+@@||shuzilm.cn^$important
+
+# ═══════════════════════════════════════════════
+# 十六、Apple 服务放行（避免影响正常功能）
+# ═══════════════════════════════════════════════
+@@||itunes.apple.com^$important
+@@||xp.apple.com^$important
+@@||music.apple.com^$important
+
+# ═══════════════════════════════════════════════
+# 十七、国家反诈中心相关（不拦截）
+# ═══════════════════════════════════════════════
+# 注意：反诈中心域名不放行也不拦截，由用户自行决定

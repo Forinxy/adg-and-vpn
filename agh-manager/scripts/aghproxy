@@ -1,0 +1,91 @@
+#!/system/bin/sh
+# ============================================================
+# aghproxy - VPN/代理网络状态监控（学习自 Ceromis aghproxy）
+#
+# 原理：Android 系统代理（VPN/netId）变化时，dumpsys 输出会变化。
+# 检测到变化后，自动刷新 DNS 拦截规则，确保 VPN 切换期间 DNS 过滤不中断。
+#
+# 用法：由 service.sh / BoxFix.sh 自动启动，无需手动干预
+#   aghproxy watch   进入监控循环
+# ============================================================
+
+AGH_DIR="/data/adb/agh"
+LOG="$AGH_DIR/agh.log"
+STATE_DIR="$AGH_DIR/state"
+SCRIPT_DIR="$AGH_DIR/scripts"
+BIN_DIR="$AGH_DIR/bin"
+YAML="$BIN_DIR/AdGuardHome.yaml"
+
+mkdir -p "$STATE_DIR"
+
+log() { echo "$(date '+%F %T') [aghproxy] $*" >> "$LOG"; }
+
+# 获取当前网络代理状态指纹（netId + 全局代理）
+proxy_fingerprint() {
+  {
+    dumpsys connectivity 2>/dev/null | grep -iE "active network|networkId" | head -5
+    settings get global http_proxy 2>/dev/null
+    getprop net.eth0.dns1 2>/dev/null
+    getprop net.dns1 2>/dev/null
+  } | md5sum 2>/dev/null | cut -d' ' -f1
+}
+
+# 获取 AGH 实际 DNS 端口
+get_agh_port() {
+  awk '/^[[:space:]]*dns:/{f=1;next} f&&/^[[:space:]]*port:/{gsub(/[^0-9]/,"",$NF);print $NF;exit}' "$YAML" 2>/dev/null
+}
+
+# 刷新 DNS 拦截规则
+refresh_dns() {
+  if [ -f "$STATE_DIR/box_mode" ]; then
+    # Box 模式：确认 mihomo nameserver 仍指向 AGH
+    local PORT
+    PORT=$(get_agh_port)
+    if [ -n "$PORT" ]; then
+      if grep -q "127.0.0.1:$PORT" /data/adb/box/mihomo/config.yaml 2>/dev/null; then
+        log "VPN 变化：mihomo 配置正确，无需调整"
+      else
+        log "VPN 变化：mihomo nameserver 失配，触发同步"
+        "$SCRIPT_DIR/aghctl" sync >> "$LOG" 2>&1
+      fi
+    fi
+  else
+    # 独立模式：刷新 iptables 劫持
+    log "VPN 变化：刷新 iptables 劫持"
+    pgrep -f "iptables.sh" >/dev/null || "$SCRIPT_DIR/iptables.sh" &
+  fi
+}
+
+# 写模式标记（供 BoxFix 更新）
+update_mode_flag() {
+  if [ -d "/data/adb/box" ] && [ -f "/data/adb/box/mihomo/config.yaml" ]; then
+    echo "box" > "$STATE_DIR/box_mode"
+  else
+    echo "standalone" > "$STATE_DIR/box_mode"
+  fi
+}
+
+case "$1" in
+  watch)
+    log "代理监控启动"
+    PREV=$(proxy_fingerprint)
+    [ -n "$PREV" ] || PREV="none"
+    while :; do
+      update_mode_flag
+      CUR=$(proxy_fingerprint)
+      [ -n "$CUR" ] || CUR="none"
+      if [ "$CUR" != "$PREV" ]; then
+        log "检测到网络状态变化"
+        refresh_dns
+        PREV="$CUR"
+      fi
+      sleep 3
+    done
+    ;;
+  fingerprint)
+    proxy_fingerprint
+    ;;
+  *)
+    echo "用法: $0 {watch|fingerprint}"
+    ;;
+esac

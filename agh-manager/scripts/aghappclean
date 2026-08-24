@@ -1,0 +1,86 @@
+#!/system/bin/sh
+# ============================================================
+# aghappclean - 应用级过滤管理（学习自 Ceromis aghappclean）
+#
+# 基于 IFW (Intent Firewall) 实现按应用维度的 DNS 控制。
+# 注意：当前 Box 共存模式下，DNS 由 mihomo 统一接管，
+#       应用级过滤通过 mihomo 的 rule-provider 实现更可靠。
+#       本工具提供 IFW 管理 + 应用状态清理。
+#
+# 用法：
+#   aghappclean --list              列出 AGH 依赖的包
+#   aghappclean --stop              停止并清理（卸载/升级时调用）
+#   aghappclean --block-app <pkg>   通过 IFW 阻止某应用联网（可选功能）
+#   aghappclean --unblock-app <pkg> 恢复某应用联网
+#   aghappclean --status            查询 IFW 状态
+# ============================================================
+
+DATA_DIR="/data/adb/agh"
+IFW_DIR="/data/system/ifw"
+IFW_BACKUP="$DATA_DIR/ifw-backup"
+LOG="$DATA_DIR/agh.log"
+STATE_DIR="$DATA_DIR/state"
+
+mkdir -p "$STATE_DIR"
+
+log() { echo "$(date '+%F %T') [aghappclean] $*" >> "$LOG"; }
+
+cmd_list() {
+  # 列出当前启用 AGH DNS 的应用
+  for pkg in $(cmd package list packages 2>/dev/null | sed 's/^package://' | head -200); do
+    uid=$(cmd package dump "$pkg" 2>/dev/null | grep -m1 "userId=" | sed 's/.*userId=//' | tr -d ' ' | cut -d' ' -f1)
+    [ -n "$uid" ] && echo "$pkg uid=$uid"
+  done 2>/dev/null | head -50
+}
+
+cmd_block_app() {
+  local pkg="$2"
+  [ -z "$pkg" ] && { echo "用法: $0 --block-app <包名>"; return 1; }
+  log "通过 IFW 阻止 $pkg 联网"
+  mkdir -p "$IFW_DIR"
+  cat > "$IFW_DIR/agh-block-$pkg.xml" <<EOF
+<?xml version="1.0" encoding="utf-8"?>
+<intent-filters>
+  <mime-type-filter packageName="$pkg" />
+</intent-filters>
+EOF
+  echo "已阻止 $pkg"
+}
+
+cmd_unblock_app() {
+  local pkg="$2"
+  [ -z "$pkg" ] && { echo "用法: $0 --unblock-app <包名>"; return 1; }
+  log "恢复 $pkg 联网"
+  rm -f "$IFW_DIR/agh-block-$pkg.xml"
+  echo "已恢复 $pkg"
+}
+
+cmd_status() {
+  echo "IFW 目录: $IFW_DIR"
+  ls "$IFW_DIR" 2>/dev/null | grep -c "agh-block-" || echo "0"
+}
+
+cmd_stop() {
+  log "停止并清理（由卸载/升级调用）"
+  # 清理 IFW 规则
+  rm -f "$IFW_DIR"/agh-block-*.xml 2>/dev/null
+  # 还原私有 DNS 设置
+  if [ -s "$DATA_DIR/private-dns.state" ]; then
+    local mode specifier
+    mode=$(grep '^mode=' "$DATA_DIR/private-dns.state" | cut -d= -f2)
+    specifier=$(grep '^specifier=' "$DATA_DIR/private-dns.state" | cut -d= -f2)
+    [ -n "$mode" ] && settings put global private_dns_mode "$mode" 2>/dev/null
+    [ -n "$specifier" ] && settings put global private_dns_specifier "$specifier" 2>/dev/null
+    log "已还原私有 DNS 设置"
+  fi
+  echo "已清理"
+}
+
+case "$1" in
+  --list) cmd_list ;;
+  --block-app) cmd_block_app "$@" ;;
+  --unblock-app) cmd_unblock_app "$@" ;;
+  --status) cmd_status ;;
+  --stop) cmd_stop ;;
+  *) echo "用法: $0 {--list|--block-app|--unblock-app|--status|--stop}" ;;
+esac

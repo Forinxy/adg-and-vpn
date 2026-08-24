@@ -1,0 +1,72 @@
+#!/system/bin/sh
+# ============================================================
+# aghbridge - 控制桥接器（学习自 Ceromis aghbridge）
+#
+# 作用：作为 aghctl 与 AGH 之间的常驻桥接进程。即使 AGH 崩溃重启，
+#       桥接进程保持存活，Web 面板/App 的控制请求始终可达。
+#
+# 用法：由 service.sh 启动，自动管理
+#   aghbridge start     启动桥接（幂等）
+#   aghbridge stop      停止桥接
+#   aghbridge status    查询桥接状态
+#   aghbridge run       进入常驻模式
+# ============================================================
+
+AGH_DIR="/data/adb/agh"
+BRIDGE_PID="$AGH_DIR/aghbridge.pid"
+STATE_DIR="$AGH_DIR/state"
+LOG="$AGH_DIR/agh.log"
+SCRIPT_DIR="$AGH_DIR/scripts"
+
+mkdir -p "$STATE_DIR"
+
+log() { echo "$(date '+%F %T') [aghbridge] $*" >> "$LOG"; }
+
+bridge_running() {
+  local pid
+  [ -s "$BRIDGE_PID" ] || return 1
+  pid=$(cat "$BRIDGE_PID" 2>/dev/null)
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  kill -0 "$pid" 2>/dev/null
+}
+
+cmd_start() {
+  bridge_running && { echo "already running"; return 0; }
+  rm -f "$BRIDGE_PID"
+  sh "$0" run >> "$LOG" 2>&1 &
+  echo $! > "$BRIDGE_PID"
+  sleep 1
+  bridge_running && { echo "started"; return 0; }
+  echo "failed"; return 1
+}
+
+cmd_stop() {
+  if bridge_running; then
+    kill "$(cat "$BRIDGE_PID")" 2>/dev/null
+  fi
+  rm -f "$BRIDGE_PID"
+  echo "stopped"
+}
+
+# 常驻模式：周期性检查 AGH 存活，状态写入 state 目录
+cmd_run() {
+  trap 'exit 0' HUP INT TERM
+  while :; do
+    if pgrep -x "AdGuardHome" >/dev/null 2>&1; then
+      echo "running" > "$STATE_DIR/status"
+    else
+      echo "stopped" > "$STATE_DIR/status"
+    fi
+    sleep 5
+  done
+}
+
+case "$1" in
+  start) cmd_start ;;
+  stop) cmd_stop ;;
+  status) bridge_running && echo "running" || echo "stopped" ;;
+  run) cmd_run ;;
+  *) echo "用法: $0 {start|stop|status|run}" ;;
+esac

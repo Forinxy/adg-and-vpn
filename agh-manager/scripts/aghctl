@@ -1,0 +1,187 @@
+#!/system/bin/sh
+# ============================================================
+# aghctl - AGH 生命周期管理工具（学习自 Ceromis agh-dns-helper）
+#
+# 用法：
+#   aghctl status         查询运行状态
+#   aghctl start          启动 AGH
+#   aghctl stop           停止 AGH（保留配置）
+#   aghctl restart        重启 AGH
+#   aghctl sync           同步 mihomo 配置 + 重启 Box
+#   aghctl rules          刷新 DNS 拦截规则
+#   aghctl cleanup        清理防火墙规则与 DNS 劫持
+#   aghctl port           输出当前 DNS 端口
+#   aghctl mode           输出当前模式（box/standalone）
+#   aghctl proxy-state    检测代理是否可达
+#   aghctl getprop KEY    读取状态文件
+# ============================================================
+
+AGH_DIR="/data/adb/agh"
+BIN_DIR="$AGH_DIR/bin"
+SCRIPT_DIR="$AGH_DIR/scripts"
+YAML="$BIN_DIR/AdGuardHome.yaml"
+MODE_FILE="$AGH_DIR/.port_mode"
+STATE_DIR="$AGH_DIR/state"
+LOG="$AGH_DIR/agh.log"
+CFG="/data/adb/box/mihomo/config.yaml"
+BOX_DIR="/data/adb/box"
+
+mkdir -p "$STATE_DIR"
+
+log() { echo "$(date '+%F %T') [aghctl] $*" >> "$LOG"; }
+
+# 读取 AGH 实际 DNS 端口（yaml 优先，config.prop 兜底）
+get_agh_port() {
+  local p
+  p=$(awk '/^[[:space:]]*dns:/{f=1;next} f&&/^[[:space:]]*port:/{gsub(/[^0-9]/,"",$NF);print $NF;exit}' "$YAML" 2>/dev/null)
+  [ -z "$p" ] && p=$(sed -n 's/^redir_port=//p' "$SCRIPT_DIR/config.prop" 2>/dev/null)
+  echo "$p"
+}
+
+# 判断 Box 是否安装
+box_installed() {
+  [ -d "$BOX_DIR" ] && [ -f "$CFG" ]
+}
+
+# 检测代理是否可达（mihomo 进程 + 1053 端口）
+proxy_reachable() {
+  pgrep -f "mihomo" >/dev/null 2>&1 || return 1
+  timeout 2 sh -c 'echo > /dev/tcp/127.0.0.1/1053' >/dev/null 2>&1 && return 0
+  timeout 2 ss -tln 2>/dev/null | grep -q ":1053 " && return 0
+  return 1
+}
+
+# AGH 进程是否存活
+agh_running() {
+  # 用 pgrep -x 精确匹配进程名（避免 -f 匹配到脚本自身）
+  pgrep -x "AdGuardHome" >/dev/null 2>&1
+}
+
+cmd_status() {
+  if agh_running; then
+    echo "running"
+    echo "running" > "$STATE_DIR/status"
+    return 0
+  fi
+  echo "stopped"
+  echo "stopped" > "$STATE_DIR/status"
+  return 1
+}
+
+cmd_start() {
+  if agh_running; then
+    log "AGH 已在运行"
+    return 0
+  fi
+  log "启动 AGH ..."
+  export SSL_CERT_DIR="/system/etc/security/cacerts/"
+  "$BIN_DIR/AdGuardHome" --no-check-update >> "$AGH_DIR/agh.log" 2>&1 &
+  sleep 2
+  if agh_running; then
+    log "AGH 启动成功"
+    echo "running" > "$STATE_DIR/status"
+    return 0
+  fi
+  log "AGH 启动失败"
+  return 1
+}
+
+cmd_stop() {
+  log "停止 AGH ..."
+  pkill -9 -f "bin/AdGuardHome" 2>/dev/null
+  pkill -9 -x "AdGuardHome" 2>/dev/null
+  sleep 1
+  echo "stopped" > "$STATE_DIR/status"
+  log "AGH 已停止"
+}
+
+cmd_restart() {
+  cmd_stop
+  sleep 1
+  cmd_start
+}
+
+# 同步 mihomo 配置（复用 BoxFix 逻辑）
+cmd_sync() {
+  local PORT
+  PORT=$(get_agh_port)
+  [ -z "$PORT" ] && { log "无法获取 AGH 端口"; return 1; }
+  if box_installed; then
+    log "同步 mihomo 配置到 127.0.0.1:$PORT ..."
+    [ -f "$CFG.aghbak" ] || cp -f "$CFG" "$CFG.aghbak"
+    # fake-ip + 端口同步 + tun + sniffer
+    sed -i 's/^\([[:space:]]*enhanced-mode:\).*/\1 fake-ip/' "$CFG"
+    sed -i "s/^\([[:space:]]*-[[:space:]]*\)127\.0\.0\.1:[0-9]*/\1127.0.0.1:$PORT/" "$CFG"
+    sed -i '/^tun:/,/^[^ ]/{s/^\([[:space:]]*enable:\).*/\1 true/;}' "$CFG"
+    sed -i '/^sniffer:/,/^[^ ]/{s/^\([[:space:]]*enable:\).*/\1 true/;}' "$CFG"
+    # cn_ip 直连兜底
+    if ! grep -q 'RULE-SET,cn_ip' "$CFG"; then
+      sed -i 's/^\([[:space:]]*\)- MATCH,/\1- RULE-SET,cn_ip,国内直连\n\1- MATCH,/' "$CFG"
+    fi
+    # IPv6
+    sed -i 's/^ipv6:.*/ipv6: true/' "$CFG"
+    if sed -n '/^dns:/,/^[^ ]/p' "$CFG" | grep -q '^[[:space:]]*ipv6:'; then
+      sed -i '/^dns:/,/^[^ ]/s/^\([[:space:]]*ipv6:\).*/\1 true/' "$CFG"
+    fi
+    log "重启 Box ..."
+    /data/adb/box/scripts/box.service restart
+    log "Box 已重启"
+  else
+    log "未检测到 Box，跳过同步"
+  fi
+}
+
+# 刷新 DNS 拦截规则（无 Box 时重新执行 iptables 劫持）
+cmd_rules() {
+  if box_installed; then
+    log "Box 模式下无需 iptables 劫持"
+  else
+    log "刷新独立模式 iptables 劫持 ..."
+    pgrep -f "iptables.sh" >/dev/null || "$SCRIPT_DIR/iptables.sh" &
+  fi
+}
+
+# 清理劫持规则与守护进程
+cmd_cleanup() {
+  log "清理劫持规则 ..."
+  pkill -9 "ProxyConfig" 2>/dev/null
+  pkill -9 "iptables.sh" 2>/dev/null
+  iptables -w 2 -t nat -F ADGUARD 2>/dev/null
+  iptables -w 2 -t nat -X ADGUARD 2>/dev/null
+  ip6tables -w 2 -D OUTPUT -p udp --dport 53 -j DROP 2>/dev/null
+  ip6tables -w 2 -D OUTPUT -p tcp --dport 53 -j DROP 2>/dev/null
+  log "清理完成"
+}
+
+cmd_port() { get_agh_port; }
+
+cmd_mode() {
+  if box_installed; then
+    echo "box"
+  else
+    echo "standalone"
+  fi
+}
+
+cmd_proxy_state() {
+  if proxy_reachable; then echo "ok"; else echo "fail"; fi
+}
+
+cmd_getprop() {
+  [ -f "$STATE_DIR/$1" ] && cat "$STATE_DIR/$1"
+}
+
+case "$1" in
+  status) cmd_status ;;
+  start) cmd_start ;;
+  stop) cmd_stop ;;
+  restart) cmd_restart ;;
+  sync) cmd_sync ;;
+  rules) cmd_rules ;;
+  cleanup) cmd_cleanup ;;
+  port) cmd_port ;;
+  mode) cmd_mode ;;
+  proxy-state) cmd_proxy_state ;;
+  getprop) cmd_getprop "$2" ;;
+  *) echo "用法: $0 {status|start|stop|restart|sync|rules|cleanup|port|mode|proxy-state|getprop}" ;;
+esac

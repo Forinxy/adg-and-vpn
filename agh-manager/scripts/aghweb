@@ -1,0 +1,318 @@
+#!/system/bin/sh
+# ============================================================
+# aghweb - AGH 专属 Web 管理面板（替代原生 App）
+#
+# 纯 shell 实现的轻量 HTTP 服务器，无需安装任何依赖。
+# 功能：
+#   GET /                管理面板首页
+#   POST /action/start   启动 AGH
+#   POST /action/stop    停止 AGH
+#   POST /action/restart 重启 AGH
+#   POST /action/sync    同步 Box 配置
+#   POST /action/cleanup 清理劫持
+#   GET /api/status      状态 JSON
+#   GET /api/logs        最近日志
+#
+# 用法：aghweb start [端口]   （默认 8080）
+# ============================================================
+
+AGH_DIR="/data/adb/agh"
+SCRIPT_DIR="$AGH_DIR/scripts"
+STATE_DIR="$AGH_DIR/state"
+LOG="$AGH_DIR/agh.log"
+PID_FILE="$AGH_DIR/aghweb.pid"
+WEB_LOG="$AGH_DIR/aghweb.log"
+CTL="$SCRIPT_DIR/aghctl"
+PORT="${2:-8080}"
+
+mkdir -p "$STATE_DIR"
+
+log() { echo "$(date '+%F %T') [aghweb] $*" >> "$WEB_LOG"; }
+
+# HTTP 响应工具
+http_ok() {
+  local body="$1" type="${2:-text/html}"
+  echo "HTTP/1.1 200 OK"
+  echo "Content-Type: $type; charset=utf-8"
+  echo "Content-Length: ${#body}"
+  echo "Connection: close"
+  echo ""
+  echo "$body"
+}
+
+http_redirect() {
+  echo "HTTP/1.1 302 Found"
+  echo "Location: /"
+  echo "Connection: close"
+  echo ""
+}
+
+# 状态 JSON
+api_status() {
+  local status mode port proxy degraded box_mode uptime
+  status=$(sh "$CTL" status 2>/dev/null)
+  mode=$(sh "$CTL" mode 2>/dev/null)
+  port=$(sh "$CTL" port 2>/dev/null)
+  proxy=$(sh "$CTL" proxy-state 2>/dev/null)
+  degraded=$(cat "$STATE_DIR/degraded" 2>/dev/null || echo "unknown")
+  box_mode=$(cat "$STATE_DIR/box_mode" 2>/dev/null || echo "unknown")
+
+  if [ -s "$STATE_DIR/uptime" ]; then
+    uptime=$(cat "$STATE_DIR/uptime")
+  else
+    uptime=$(cut -d. -f1 /proc/uptime 2>/dev/null)
+  fi
+
+  cat <<EOF
+{
+  "status": "$status",
+  "mode": "$mode",
+  "box_mode": "$box_mode",
+  "dns_port": "$port",
+  "proxy": "$proxy",
+  "degraded": "$degraded",
+  "uptime": "$uptime"
+}
+EOF
+}
+
+# 首页
+page_index() {
+  local status mode port proxy degraded box_mode
+  status=$(sh "$CTL" status 2>/dev/null)
+  mode=$(sh "$CTL" mode 2>/dev/null)
+  port=$(sh "$CTL" port 2>/dev/null)
+  proxy=$(sh "$CTL" proxy-state 2>/dev/null)
+  degraded=$(cat "$STATE_DIR/degraded" 2>/dev/null || echo "unknown")
+  box_mode=$(cat "$STATE_DIR/box_mode" 2>/dev/null || echo "unknown")
+
+  local status_color="green"
+  [ "$status" = "running" ] || status_color="red"
+  local proxy_color="green"
+  [ "$proxy" = "ok" ] || proxy_color="red"
+  local box_mode_text="独立模式"
+  [ "$box_mode" = "box" ] && box_mode_text="Box 共存模式"
+  [ "$box_mode" = "degraded" ] && box_mode_text="降级模式"
+  local deg_color="green"
+  [ "$degraded" = "degraded" ] && deg_color="red"
+
+  cat <<EOF
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AGH 管理面板</title>
+<style>
+body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; background: #1a1a2e; color: #eee; margin: 0; padding: 20px; }
+.container { max-width: 600px; margin: 0 auto; }
+h1 { font-size: 22px; color: #4cc9f0; }
+.card { background: #16213e; border-radius: 12px; padding: 20px; margin-bottom: 16px; box-shadow: 0 2px 8px rgba(0,0,0,.3); }
+.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.item { background: #0f3460; border-radius: 8px; padding: 12px; }
+.item .label { font-size: 12px; color: #888; margin-bottom: 4px; }
+.item .value { font-size: 18px; font-weight: bold; }
+.dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; }
+.actions { display: flex; flex-wrap: wrap; gap: 8px; }
+button { background: #4cc9f0; color: #1a1a2e; border: none; border-radius: 8px; padding: 10px 16px; font-size: 14px; font-weight: bold; cursor: pointer; }
+button.danger { background: #ef476f; }
+button.warn { background: #ffd166; }
+button:hover { opacity: .85; }
+.logo { text-align: center; margin-bottom: 10px; }
+.logo svg { width: 64px; height: 64px; }
+@media (max-width: 480px) { .grid { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="logo">
+    <svg viewBox="0 0 24 24" fill="#4cc9f0"><path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4z"/></svg>
+  </div>
+  <h1 style="text-align:center">AdGuard Home 管理面板</h1>
+
+  <div class="card">
+    <div class="grid">
+      <div class="item">
+        <div class="label">运行状态</div>
+        <div class="value"><span class="dot" style="background:$status_color"></span>$status</div>
+      </div>
+      <div class="item">
+        <div class="label">工作模式</div>
+        <div class="value">$box_mode_text</div>
+      </div>
+      <div class="item">
+        <div class="label">DNS 端口</div>
+        <div class="value">$port</div>
+      </div>
+      <div class="item">
+        <div class="label">代理状态</div>
+        <div class="value"><span class="dot" style="background:$proxy_color"></span>$proxy</div>
+      </div>
+      <div class="item">
+        <div class="label">降级状态</div>
+        <div class="value"><span class="dot" style="background:$deg_color"></span>$degraded</div>
+      </div>
+      <div class="item">
+        <div class="label">运行时间</div>
+        <div class="value">${uptime}s</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="actions">
+      <button onclick="action('start')">启动</button>
+      <button class="danger" onclick="action('stop')">停止</button>
+      <button class="warn" onclick="action('restart')">重启 AGH</button>
+      <button onclick="action('sync')">同步 Box</button>
+      <button class="danger" onclick="action('cleanup')">清理劫持</button>
+      <button onclick="location.href='http://127.0.0.1:3000'">打开 AGH 面板</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="item">
+      <div class="label">最近日志</div>
+      <pre id="logs" style="white-space:pre-wrap;font-size:11px;max-height:200px;overflow-y:auto;color:#8be9fd">加载中...</pre>
+    </div>
+  </div>
+</div>
+<script>
+function action(name) {
+  fetch('/action/' + name, { method: 'POST' }).then(function(r) { return r.text(); }).then(function(t) { alert(t); location.reload(); });
+}
+function loadLogs() {
+  fetch('/api/logs').then(function(r) { return r.text(); }).then(function(t) { document.getElementById('logs').textContent = t; });
+}
+loadLogs();
+setInterval(loadLogs, 5000);
+</script>
+</body>
+</html>
+EOF
+}
+
+# 最近日志
+api_logs() {
+  tail -50 "$LOG" 2>/dev/null || echo "无日志"
+}
+
+# 执行动作
+do_action() {
+  local name="$1"
+  case "$name" in
+    start)
+      "$CTL" start >/dev/null 2>&1 && echo "AGH 已启动" || echo "AGH 启动失败"
+      ;;
+    stop)
+      "$CTL" stop >/dev/null 2>&1
+      echo "AGH 已停止"
+      ;;
+    restart)
+      "$CTL" restart >/dev/null 2>&1
+      echo "AGH 已重启"
+      ;;
+    sync)
+      "$CTL" sync >/dev/null 2>&1 && echo "Box 配置已同步并重启" || echo "同步失败"
+      ;;
+    cleanup)
+      "$CTL" cleanup >/dev/null 2>&1
+      echo "已清理劫持规则"
+      ;;
+    *) echo "未知操作" ;;
+  esac
+}
+
+# 更新运行时间状态
+update_uptime() {
+  local boot
+  boot=$(cut -d. -f1 /proc/uptime 2>/dev/null)
+  [ -n "$boot" ] && echo "$boot" > "$STATE_DIR/uptime"
+}
+
+# HTTP 处理循环（每次连接处理一个请求后退出）
+serve() {
+  local req="" method="" path="" body=""
+  req=$(head -1 2>/dev/null | tr -d '\r')
+  [ -z "$req" ] && return 0
+  method=$(echo "$req" | cut -d' ' -f1)
+  path=$(echo "$req" | cut -d' ' -f2)
+
+  update_uptime
+
+  case "$path" in
+    "/"|"")
+      http_ok "$(page_index)"
+      ;;
+    /api/status)
+      http_ok "$(api_status)" "application/json"
+      ;;
+    /api/logs)
+      http_ok "$(api_logs)" "text/plain"
+      ;;
+    /action/*)
+      if [ "$method" != "POST" ]; then
+        http_ok "需要 POST" "text/plain"
+      else
+        do_action "${path#/action/}" > /tmp/.aghweb_action 2>&1
+        http_ok "$(cat /tmp/.aghweb_action)" "text/plain"
+      fi
+      ;;
+    /favicon.ico)
+      http_ok "" "image/x-icon"
+      ;;
+    *)
+      http_ok "404 Not Found" "text/plain"
+      ;;
+  esac
+}
+
+cmd_start() {
+  if [ -s "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+    echo "aghweb 已在运行 (PID $(cat "$PID_FILE"))，端口 $PORT"
+    return 0
+  fi
+  log "启动 Web 面板，端口 $PORT"
+  # 用 toybox nc 监听（Android 内置）
+  sh "$0" run "$PORT" >> "$WEB_LOG" 2>&1 &
+  echo $! > "$PID_FILE"
+  sleep 1
+  if kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+    echo "aghweb 已启动，端口 $PORT"
+    echo "访问: http://127.0.0.1:$PORT/"
+  else
+    echo "启动失败，查看 $WEB_LOG"
+    return 1
+  fi
+}
+
+cmd_stop() {
+  if [ -s "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+    kill "$(cat "$PID_FILE")" 2>/dev/null
+    echo "aghweb 已停止"
+  else
+    echo "aghweb 未运行"
+  fi
+  rm -f "$PID_FILE"
+}
+
+cmd_run() {
+  local p="$1"
+  # 用 toybox nc 实现 HTTP 服务器：每连接 fork 一次 serve 处理
+  while :; do
+    sh "$0" serve | nc -l -p "$p" >/dev/null 2>&1
+    sleep 1
+  done
+}
+
+cmd_serve_once() {
+  serve
+}
+
+case "$1" in
+  start) cmd_start ;;
+  stop) cmd_stop ;;
+  run) cmd_run "$2" ;;
+  serve) cmd_serve_once ;;
+  *) echo "用法: $0 {start [端口]|stop|serve}" ;;
+esac

@@ -246,6 +246,8 @@ wait_for_boot
 degraded=0
 last_proxy_ok=1
 check_count=0
+network_check_counter=0
+NETWORK_CHECK_INTERVAL=10  # 网络健康时每 10 轮（5 分钟）检查一次国内连通性，省电
 
 # 初始同步：不等待代理，立即同步配置
 if box_installed; then
@@ -282,16 +284,20 @@ while true; do
       check_count=0
       needs_sync "$AGH_PORT" && sync_mihomo "$AGH_PORT"
 
-      # 即使 mihomo 进程存活，也要检查国内网络是否正常
-      # 代理到期/接口不可用时 mihomo 仍在运行但所有流量被阻塞
-      if ! network_reachable; then
-        log "警告：mihomo 运行中但国内网络不可达，代理可能已失效"
-        check_count=$((check_count + 1))
-        if [ $check_count -ge 3 ] && [ "$degraded" -eq 0 ]; then
-          fallback_to_standalone "$AGH_PORT"
-          degraded=1
-          check_count=0
-          write_state
+      # 网络健康时每 10 轮（5 分钟）检查一次国内连通性
+      # 仅在怀疑有问题时（check_count>0）才每轮检查
+      network_check_counter=$((network_check_counter + 1))
+      if [ $network_check_counter -ge $NETWORK_CHECK_INTERVAL ] || [ "$check_count" -gt 0 ]; then
+        network_check_counter=0
+        if ! network_reachable; then
+          log "警告：mihomo 运行中但国内网络不可达，代理可能已失效"
+          check_count=$((check_count + 1))
+          if [ $check_count -ge 3 ] && [ "$degraded" -eq 0 ]; then
+            fallback_to_standalone "$AGH_PORT"
+            degraded=1
+            check_count=0
+            write_state
+          fi
         fi
       fi
     else

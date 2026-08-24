@@ -9,12 +9,13 @@
 #   sh /data/local/tmp/apply_fix.sh
 #
 # 本脚本自动完成：
-#   1. 写入 scripts/BoxFix.sh（自适应协调器 v11）
+#   1. 写入 scripts/BoxFix.sh（自适应协调器 v12）
 #   2. 修改 service.sh：启动 BoxFix + 读取 .port_mode 设置端口
 #   3. 修改 ModuleMOD.sh：描述文案随端口模式动态更新
 #   4. 修改 uninstall.sh：卸载时还原 Box mihomo 配置
 #   5. 清空 config.prop 中的 PROXY_URL（本模块不管理代理订阅）
-#   6. 解锁/重新锁定脚本防篡改
+#   6. 修改 box.service：prepare_mihomo 跳过 enhanced-mode 覆盖（AGH 兼容）
+#   7. 解锁/重新锁定脚本防篡改
 # ============================================================
 
 AGH_DIR="/data/adb/agh"
@@ -39,17 +40,13 @@ log "写入 scripts/BoxFix.sh ..."
 cat > "$SCRIPT_DIR/BoxFix.sh" <<'BOXEOF'
 #!/system/bin/sh
 # ============================================================
-# BoxFix v11 自适应协调器 + 故障自动降级
+# BoxFix v12 自适应协调器 + 故障自动降级
 #
-# 相比 v10 的改进：
-#   1. 【修复断网问题】移除 wait_for_proxy，启动后立即同步，
-#      避免开机时因等待代理导致长时间无网络
-#   2. 【修复断连问题】fallback_to_standalone 替代 degrade_to_direct，
-#      Box 断连时启用 iptables 53 劫持到 AGH，保障国内网络可用
-#   3. 主循环不再无条件清理 iptables 规则，避免规则窗口期
-#   4. 【修复代理到期断网】新增 network_reachable 检测，
-#      代理到期/接口不可用时 mihomo 仍在运行但流量被阻塞，
-#      network_reachable 通过直连国内 DNS 识别此状态并触发回退
+# 相比 v11 的改进：
+#   1. 【修复重启后 VPN 无法自动连接】sync_mihomo 重启后验证
+#      enhanced-mode 是否被 prepare_mihomo 覆盖，日志告警
+#   2. 配合 apply_fix.sh 修改 box.service，跳过 enhanced-mode 覆盖
+#      （AGH 共存时 prepare_mihomo 不再将 fake-ip 改回 redir-host）
 #
 #  - Box 存在   -> AGH 作为广告过滤上游（不劫持 53），mihomo nameserver 自动同步到 AGH 实际 DNS 端口
 #                  random 模式随机端口、fixed 模式固定 5591，两者均自动同步
@@ -195,6 +192,14 @@ sync_mihomo() {
   touch "$MARK"
   log "配置同步完成，重启 Box ..."
   $RESTART_CMD
+  # 等待 box.service 的 prepare_mihomo 完成（可能覆盖 enhanced-mode）
+  sleep 3
+  local current_em
+  current_em=$(awk '/enhanced-mode:/ {print $2}' "$CFG" 2>/dev/null)
+  if [ "$current_em" != "fake-ip" ]; then
+    log "警告：box.service prepare_mihomo 将 enhanced-mode 改回 $current_em"
+    log "建议运行 apply_fix.sh 注入 AGH 兼容补丁（跳过 enhanced-mode 覆盖）"
+  fi
   log "Box 服务已重启"
 }
 
@@ -366,7 +371,7 @@ while true; do
 done
 BOXEOF
 chmod 755 "$SCRIPT_DIR/BoxFix.sh"
-log "BoxFix.sh v11 写入完成"
+log "BoxFix.sh v12 写入完成"
 
 # 1.5 写入管理工具集与规则文件
 # 查找路径：优先 agh-manager/scripts/ 子目录，其次同目录（兼容两种分发方式）
@@ -473,10 +478,31 @@ else
     log "规则文件或 yaml 缺失，跳过规则注入"
 fi
 
-# 6. 重新锁定防篡改（仅锁定模块内脚本，BoxFix 在 agh/scripts 不锁，避免协调器自修复受阻）
+# 6. 修改 box.service：prepare_mihomo 跳过 enhanced-mode 覆盖（AGH 兼容）
+log "检查 box.service ..."
+BOX_SERVICE="/data/adb/box/scripts/box.service"
+if [ -f "$BOX_SERVICE" ]; then
+    if grep -q "aghctl" "$BOX_SERVICE"; then
+        log "box.service 已含 AGH 兼容逻辑，跳过"
+    else
+        log "box.service 未含 AGH 兼容逻辑，注入 AGH 检测 ..."
+        # 在 prepare_mihomo 的 enhanced-mode 覆盖代码前插入 AGH 检测
+        sed -i '/log Warning "已将 fake-ip 替换为 redir-host"/i\      if [ ! -x /data/adb/agh/bin/aghctl ]; then' "$BOX_SERVICE"
+        # 在 sniffer 修改行后插入 fi
+        sed -i '/^[[:space:]]*sed_file_if_changed "${mihomo_config}" "\/sniffer:/a\      fi' "$BOX_SERVICE"
+        log "box.service 已注入 AGH 检测跳过 enhance-mode 覆盖"
+    fi
+else
+    log "未找到 box.service（Box 可能未安装），跳过"
+fi
+
+# 7. 重新锁定防篡改（仅锁定模块内脚本，BoxFix 在 agh/scripts 不锁，避免协调器自修复受阻）
 find "$ADGPATH" -type f -name "*.sh" -exec chattr +i {} \; 2>/dev/null
 
 log "=============================================="
 log "修复完成！请重启设备或在终端执行："
 log "  pkill -f AdGuardHome && sh /data/adb/modules/AdGuardHome/service.sh &"
+log ""
+log "注意：步骤 6 已修改 /data/adb/box/scripts/box.service，"
+log "      若后续更新 Box 模块需重新运行本脚本。"
 log "=============================================="

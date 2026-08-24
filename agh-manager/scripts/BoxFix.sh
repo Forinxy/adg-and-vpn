@@ -1,16 +1,12 @@
 #!/system/bin/sh
 # ============================================================
-# BoxFix v11 自适应协调器 + 故障自动降级
+# BoxFix v12 自适应协调器 + 故障自动降级
 #
-# 相比 v10 的改进：
-#   1. 【修复断网问题】移除 wait_for_proxy，启动后立即同步，
-#      避免开机时因等待代理导致长时间无网络
-#   2. 【修复断连问题】fallback_to_standalone 替代 degrade_to_direct，
-#      Box 断连时启用 iptables 53 劫持到 AGH，保障国内网络可用
-#   3. 主循环不再无条件清理 iptables 规则，避免规则窗口期
-#   4. 【修复代理到期断网】新增 network_reachable 检测，
-#      代理到期/接口不可用时 mihomo 仍在运行但流量被阻塞，
-#      network_reachable 通过直连国内 DNS 识别此状态并触发回退
+# 相比 v11 的改进：
+#   1. 【修复重启后 VPN 无法自动连接】sync_mihomo 重启后验证
+#      enhanced-mode 是否被 prepare_mihomo 覆盖，日志告警
+#   2. 配合 apply_fix.sh 修改 box.service，跳过 enhanced-mode 覆盖
+#      （AGH 共存时 prepare_mihomo 不再将 fake-ip 改回 redir-host）
 #
 #  - Box 存在   -> AGH 作为广告过滤上游（不劫持 53），mihomo nameserver 自动同步到 AGH 实际 DNS 端口
 #                  random 模式随机端口、fixed 模式固定 5591，两者均自动同步
@@ -156,6 +152,14 @@ sync_mihomo() {
   touch "$MARK"
   log "配置同步完成，重启 Box ..."
   $RESTART_CMD
+  # 等待 box.service 的 prepare_mihomo 完成（可能覆盖 enhanced-mode）
+  sleep 3
+  local current_em
+  current_em=$(awk '/enhanced-mode:/ {print $2}' "$CFG" 2>/dev/null)
+  if [ "$current_em" != "fake-ip" ]; then
+    log "警告：box.service prepare_mihomo 将 enhanced-mode 改回 $current_em"
+    log "建议运行 apply_fix.sh 注入 AGH 兼容补丁（跳过 enhanced-mode 覆盖）"
+  fi
   log "Box 服务已重启"
 }
 
@@ -228,7 +232,7 @@ start_aghproxy() {
 # ═══════════════════════════════════════════════
 # 主流程
 # ═══════════════════════════════════════════════
-log "BoxFix v11 启动"
+log "BoxFix v12 启动"
 
 # 确保管理脚本可执行
 chmod 755 "$CTL" "$SCRIPT_DIR/aghproxy" "$SCRIPT_DIR/aghbridge" "$SCRIPT_DIR/aghappclean" 2>/dev/null

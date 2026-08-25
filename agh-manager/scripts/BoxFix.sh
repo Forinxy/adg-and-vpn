@@ -283,19 +283,26 @@ last_proxy_ok=1
 check_count=0
 network_check_counter=0
 NETWORK_CHECK_INTERVAL=10  # 网络健康时每 10 轮（5 分钟）检查一次国内连通性，省电
+LAST_SYNC_TIME=0
+SYNC_COOLDOWN=120  # 同步冷却时间（秒），避免反复重启 Box
 
-# 初始同步：不等待代理，立即同步配置
+# 初始同步：AGH 未就绪时跳过，等主循环延迟同步
 if box_installed; then
-  AGH_PORT=$(get_agh_port)
-  log "检查初始配置同步状态"
-  if needs_sync "$AGH_PORT"; then
-    sync_mihomo "$AGH_PORT"
+  if [ $AGH_PENDING -eq 1 ]; then
+    log "AGH 未就绪，跳过初始同步，等待主循环延迟同步"
   else
-    log "配置已同步"
-    if ! proxy_reachable; then
-      log "初始代理不可达，重启 Box（AGH 已就绪后重试）"
-      $RESTART_CMD
-      log "Box 已重启"
+    AGH_PORT=$(get_agh_port)
+    log "检查初始配置同步状态"
+    if needs_sync "$AGH_PORT"; then
+      sync_mihomo "$AGH_PORT"
+      LAST_SYNC_TIME=$(date +%s)
+    else
+      log "配置已同步"
+      if ! proxy_reachable; then
+        log "初始代理不可达，重启 Box（AGH 已就绪后重试）"
+        $RESTART_CMD
+        log "Box 已重启"
+      fi
     fi
   fi
 fi
@@ -314,6 +321,7 @@ while true; do
         log "AGH 端口已就绪，触发延迟同步"
         sync_mihomo "$AGH_PORT"
         AGH_PENDING=0
+        LAST_SYNC_TIME=$(date +%s)
         log "延迟同步完成"
       fi
     fi
@@ -327,7 +335,11 @@ while true; do
       fi
       last_proxy_ok=1
       check_count=0
-      needs_sync "$AGH_PORT" && sync_mihomo "$AGH_PORT"
+      NOW=$(date +%s)
+      if [ $((NOW - LAST_SYNC_TIME)) -ge $SYNC_COOLDOWN ] && needs_sync "$AGH_PORT"; then
+        sync_mihomo "$AGH_PORT"
+        LAST_SYNC_TIME=$NOW
+      fi
 
       # 网络健康时每 10 轮（5 分钟）检查一次国内连通性
       network_check_counter=$((network_check_counter + 1))

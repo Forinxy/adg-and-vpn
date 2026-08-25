@@ -66,6 +66,7 @@ DEGRADED_FLAG="/data/adb/box/mihomo/.degraded"
 YAML="$BIN_DIR/AdGuardHome.yaml"
 STATE_DIR="/data/adb/agh/state"
 CTL="$SCRIPT_DIR/aghctl"
+AGH_PENDING=0
 
 mkdir -p "$STATE_DIR"
 
@@ -88,17 +89,18 @@ wait_for_boot() {
   log "系统开机完成"
 }
 
-# 等待 AGH DNS 端口就绪（最多 30 秒）
+# 等待 AGH DNS 端口就绪（最多 60 秒）
 wait_for_agh() {
   local i=0 port
-  while [ $i -lt 15 ]; do
+  while [ $i -lt 30 ]; do
     port=$(get_agh_port)
     [ -n "$port" ] && timeout 2 sh -c "echo > /dev/tcp/127.0.0.1/$port" >/dev/null 2>&1 && return 0
     i=$((i + 1))
     sleep 2
   done
-  log "警告：AGH 端口未就绪，继续执行"
-  return 1
+  log "警告：AGH 端口未就绪，将延迟同步"
+  AGH_PENDING=1
+  return 0
 }
 
 # Box 是否已安装（存在运行目录与 mihomo 配置）
@@ -343,6 +345,17 @@ while true; do
   if box_installed; then
     AGH_PORT=$(get_agh_port)
     write_state
+
+    # 延迟同步：之前 AGH 未就绪，现在检查是否已就绪
+    if [ $AGH_PENDING -eq 1 ]; then
+      AGH_PORT=$(get_agh_port)
+      if [ -n "$AGH_PORT" ] && timeout 2 sh -c "echo > /dev/tcp/127.0.0.1/$AGH_PORT" >/dev/null 2>&1; then
+        log "AGH 端口已就绪，触发延迟同步"
+        sync_mihomo "$AGH_PORT"
+        AGH_PENDING=0
+        log "延迟同步完成"
+      fi
+    fi
 
     if proxy_reachable; then
       if [ -f "$DEGRADED_FLAG" ]; then

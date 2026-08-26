@@ -70,7 +70,25 @@ STATE_DIR="/data/adb/agh/state"
 CTL="$SCRIPT_DIR/aghctl"
 AGH_PENDING=0
 
+# 将 Box 自带工具目录加入 PATH（AGH 模块环境默认不含，curl 等不可用）
+PATH="$BOX_DIR/bin:$BOX_DIR/scripts:$PATH"
+export PATH
+
 mkdir -p "$STATE_DIR"
+
+# ========== curl 探测（AGH 环境无 PATH curl 时回退到 box 自带） ==========
+CURL_BIN=""
+have_curl() {
+    [ -n "$CURL_BIN" ] && return 0
+    if command -v curl >/dev/null 2>&1; then
+        CURL_BIN="curl"
+    elif [ -x "$BOX_DIR/bin/curl" ]; then
+        CURL_BIN="$BOX_DIR/bin/curl"
+    else
+        return 1
+    fi
+    return 0
+}
 
 # 防止重复启动（基于进程名匹配）
 [ "$(pgrep -f "scripts/BoxFix.sh" | wc -l)" -gt 2 ] && exit
@@ -137,9 +155,9 @@ proxy_reachable() {
 # ========== 国内网络是否可达（HTTP 检测） ==========
 network_reachable() {
     # 用 HTTP 访问国内网站，避免 DNS 干扰
-    if command -v curl >/dev/null 2>&1; then
-        timeout 3 curl -s -m 3 http://www.qq.com >/dev/null 2>&1 && return 0
-        timeout 3 curl -s -m 3 http://www.baidu.com >/dev/null 2>&1 && return 0
+    if have_curl; then
+        timeout 3 "$CURL_BIN" -s -m 3 http://www.qq.com >/dev/null 2>&1 && return 0
+        timeout 3 "$CURL_BIN" -s -m 3 http://www.baidu.com >/dev/null 2>&1 && return 0
     fi
     # 兜底：检查 AGH 本身是否存活
     local PORT
@@ -153,9 +171,9 @@ network_reachable() {
 # 若开机时 mihomo 早于 AGH/网络就绪，测速全失败，节点标记无效后不重试。
 # 该检查通过代理访问国外站点，能通说明自动选择组已有可用节点。
 proxy_healthy() {
-    if command -v curl >/dev/null 2>&1; then
-        timeout 6 curl -s -m 6 -o /dev/null https://cp.cloudflare.com/generate_204 2>/dev/null && return 0
-        timeout 6 curl -s -m 6 -o /dev/null https://www.google.com/generate_204 2>/dev/null && return 0
+    if have_curl; then
+        timeout 6 "$CURL_BIN" -s -m 6 -o /dev/null https://cp.cloudflare.com/generate_204 2>/dev/null && return 0
+        timeout 6 "$CURL_BIN" -s -m 6 -o /dev/null https://www.google.com/generate_204 2>/dev/null && return 0
     fi
     return 1
 }
@@ -368,17 +386,24 @@ if box_installed; then
         sync_mihomo "$AGH_PORT"
     else
         log "配置已同步"
-        if ! proxy_reachable; then
-            log "初始代理不可达，重启 Box（AGH 已就绪后重试）"
+    fi
+
+    # 开机恢复：自动选择组无有效节点时（开机测速早于网络就绪），
+    # 最多重启 2 次触发 url-test 重新测速，避免长期保持无效节点。
+    # 仅在有 curl 可验证时执行；无 curl 时跳过，避免误重启。
+    if proxy_reachable && have_curl; then
+        retry=0
+        while [ $retry -lt 2 ]; do
+            if proxy_healthy; then
+                log "自动选择组节点有效"
+                break
+            fi
+            retry=$((retry + 1))
+            log "自动选择组无有效节点（第 ${retry} 次），重启 Box 触发重新测速"
+            rm -f "$SYNC_LOCK"
             $RESTART_CMD
-            log "Box 已重启"
-        elif ! proxy_healthy; then
-            # 代理进程在但自动选择组无有效节点（开机测速早于网络就绪），
-            # 强制重启一次触发 url-test 重新测速，等价于手动重启 Box
-            log "代理进程存活但自动选择节点无效，重启 Box 触发重新测速"
-            sync_mihomo "$AGH_PORT"
-            log "Box 已重启（重新测速）"
-        fi
+            sleep 30
+        done
     fi
 fi
 
@@ -433,10 +458,9 @@ while true; do
                         write_state
                     fi
                 elif ! proxy_healthy; then
-                    # 国内可达但自动选择组无有效节点（url-test 未重新测速），
-                    # 重启一次触发重新测速，避免长期保持无效节点
-                    log "自动选择节点无效，重启 Box 触发重新测速"
-                    sync_mihomo "$AGH_PORT"
+                    # 仅记录不重启：自动选择组暂无有效节点时，访问外网会触发
+                    # url-test 的 lazy 自动重测，主动重启反而造成频繁断连
+                    log "提示：自动选择组暂无有效节点（下次访问外网时自动重测）"
                     check_count=0
                 else
                     # 网络恢复时重置计数
